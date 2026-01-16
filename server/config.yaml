@@ -1,0 +1,21 @@
+# GOST v3 Server Configuration
+# PHT (Plain HTTP Tunnel) protocol for Cloudflare Access compatibility
+# This server runs on your-server.example.com and listens for PHT connections
+
+services:
+  - name: http-pht-server
+    addr: :8080
+    handler:
+      type: http
+      metadata:
+        udp: true
+    listener:
+      type: pht
+      metadata:
+        authorizePath: /authorize
+        pushPath: /push
+        pullPath: /pull
+
+log:
+  level: info
+  output: stderr
