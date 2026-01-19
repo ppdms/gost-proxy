@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run GOST v3 server for Cloudflare Tunnel with PHT protocol
+# Run GOST v3 server for Cloudflare Tunnel
 
 set -e
 
 CONTAINER_NAME="gost-server"
 CONFIG_FILE="config.yaml"
 
-echo "=== Starting GOST v3 Server (PHT Protocol) ==="
+echo "=== Starting GOST v3 Server ==="
 
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -29,6 +29,8 @@ docker pull gogost/gost:latest
 docker run -d \
     --name "$CONTAINER_NAME" \
     --restart unless-stopped \
+    --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+    --sysctl net.ipv6.conf.default.disable_ipv6=1 \
     -p 127.0.0.1:8080:8080 \
     -v "$(pwd)/$CONFIG_FILE:/etc/gost/config.yaml:ro" \
     gogost/gost:latest \
@@ -37,7 +39,7 @@ docker run -d \
 echo ""
 echo "=== GOST v3 Server Started ==="
 echo "Container: $CONTAINER_NAME"
-echo "Listening on: 127.0.0.1:8080 (PHT Protocol)"
+echo "Listening on: 127.0.0.1:8080"
 echo "Config: $CONFIG_FILE"
 echo ""
 echo "Make sure your Cloudflare Tunnel points to http://localhost:8080"

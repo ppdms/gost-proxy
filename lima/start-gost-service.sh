@@ -92,103 +92,25 @@ else
     echo "✓ Go already installed (${GO_VERSION})"
 fi
 
-# Check if GOST needs to be built or rebuilt
-GOST_X_REPO="https://github.com/ppdms/x.git"
-GOST_X_BRANCH="feature/pht-custom-headers"
-NEEDS_BUILD=false
-
+# Check if GOST is installed
 if ! limactl shell "$VM_NAME" bash -c "command -v gost" &>/dev/null; then
-    echo "GOST not found in VM, building..."
-    NEEDS_BUILD=true
-else
-    # Check if fork has new commits
-    REMOTE_HASH=$(git ls-remote "$GOST_X_REPO" "refs/heads/$GOST_X_BRANCH" | cut -f1)
-    VM_HASH=$(limactl shell "$VM_NAME" bash -c "cat /tmp/gost-build/.build-hash 2>/dev/null || echo 'none'")
+    echo "GOST not found in VM, installing standard GOST v3..."
     
-    if [ "$REMOTE_HASH" != "$VM_HASH" ]; then
-        echo "New commits available, rebuilding GOST..."
-        NEEDS_BUILD=true
-    else
-        echo "✓ GOST is up to date"
-    fi
-fi
-
-if [ "$NEEDS_BUILD" = true ]; then
-    # Clone or update custom gost-x fork
-    echo "Fetching custom gost-x from $GOST_X_REPO (branch: $GOST_X_BRANCH)..."
-    limactl shell "$VM_NAME" bash -c "
-        set -e
-        if [ -d /tmp/gost-build/gost-x/.git ]; then
-            cd /tmp/gost-build/gost-x
-            # Try to fetch and reset, if it fails, delete and re-clone
-            if ! git fetch origin 2>/dev/null || ! git reset --hard origin/$GOST_X_BRANCH 2>/dev/null; then
-                echo 'Git repository corrupted, re-cloning...'
-                cd /tmp/gost-build
-                rm -rf gost-x
-                git clone -b $GOST_X_BRANCH $GOST_X_REPO gost-x
-            fi
-        else
-            mkdir -p /tmp/gost-build
-            cd /tmp/gost-build
-            rm -rf gost-x  # Clean up any partial directory
-            git clone -b $GOST_X_BRANCH $GOST_X_REPO gost-x
-        fi
-    "
-    
-    # Build GOST in VM
-    echo "Building GOST binary (this may take a minute)..."
+    # Install GOST using Go
     limactl shell "$VM_NAME" bash -c '
         set -e
         export PATH=$PATH:/usr/local/go/bin
         export GOPATH=$HOME/go
         
-        # Clone main GOST repo if not exists
-        if [ ! -d "/tmp/gost-build/gost" ]; then
-            echo "Cloning GOST repository..."
-            cd /tmp/gost-build
-            git clone --depth 1 https://github.com/go-gost/gost.git
-        fi
+        echo "Installing standard GOST v3..."
+        go install github.com/go-gost/gost/cmd/gost@latest
         
-        cd /tmp/gost-build/gost
-        
-        # Replace gost-x dependency with our local modified version
-        echo "Updating go.mod to use local gost-x..."
-        go mod edit -replace github.com/go-gost/x=/tmp/gost-build/gost-x
-        
-        # Tidy dependencies
-        echo "Running go mod tidy..."
-        go mod tidy
-        
-        # Build
-        echo "Building GOST..."
-        go build -v -o gost ./cmd/gost
-        
-        # Verify
-        if [ -f "gost" ]; then
-            ls -lh gost
-            echo "✓ GOST built successfully"
-        else
-            echo "✗ Build failed - gost binary not found"
-            exit 1
-        fi
+        sudo cp $HOME/go/bin/gost /usr/local/bin/gost
+        sudo chmod +x /usr/local/bin/gost
     '
-    
-    # Stop running GOST if it exists
-    if limactl shell "$VM_NAME" bash -c "pgrep -x gost" &>/dev/null; then
-        echo "Stopping running GOST instance..."
-        limactl shell "$VM_NAME" sudo pkill -9 gost || true
-        sleep 1
-    fi
-    
-    # Install to /usr/local/bin
-    limactl shell "$VM_NAME" sudo cp /tmp/gost-build/gost/gost /usr/local/bin/gost
-    limactl shell "$VM_NAME" sudo chmod +x /usr/local/bin/gost
-    
-    # Store build hash (git commit)
-    REMOTE_HASH=$(git ls-remote "$GOST_X_REPO" "refs/heads/$GOST_X_BRANCH" | cut -f1)
-    limactl shell "$VM_NAME" bash -c "echo '$REMOTE_HASH' > /tmp/gost-build/.build-hash"
-    
-    echo "✓ GOST built and installed"
+    echo "✓ GOST installed successfully"
+else
+    echo "✓ GOST is already installed"
 fi
 
 # Prepare config with environment variables

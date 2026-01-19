@@ -1,5 +1,5 @@
 # GOST v3 Client Configuration
-# Connects to Cloudflare Access protected PHT server with service token headers
+# Connects to Cloudflare Access protected WSS server with service token headers
 
 services:
   - name: local-socks5-proxy
@@ -34,13 +34,10 @@ chains:
             connector:
               type: http
             dialer:
-              type: phts
+              type: wss
               tls:
                 serverName: ${GOST_SERVER_HOSTNAME}
               metadata:
-                authorizePath: /authorize
-                pushPath: /push
-                pullPath: /pull
                 header:
                   CF-Access-Client-Id: "${CF_ACCESS_CLIENT_ID}"
                   CF-Access-Client-Secret: "${CF_ACCESS_CLIENT_SECRET}"

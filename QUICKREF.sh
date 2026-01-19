@@ -43,23 +43,13 @@ limactl list
 # View GOST service logs in VM
 limactl shell gost sudo journalctl -u gost.service -f
 
-📦 BUILD
+📦 INSTALL
 ──────────────────────────────────────────────────────────────────
-# Automatic build in Lima VM
+# Automatic install in Lima VM
 cd lima && ./start-gost-service.sh
 
-# Build with Nix (experimental)
-nix build .#gost
-
-🔄 UPSTREAM PR
-──────────────────────────────────────────────────────────────────
-Fork: https://github.com/ppdms/x (branch: feature/pht-custom-headers)
-PR:   https://github.com/go-gost/x/pull/80
-
-Key changes:
-  - Added Header support to PHT client
-  - Modified authorize, push, pull to inject headers
-  - Added header parsing from YAML metadata
+# Run with Nix
+nix run .#client
 
 📚 DOCUMENTATION
 ──────────────────────────────────────────────────────────────────
