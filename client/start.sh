@@ -29,10 +29,12 @@ fi
 # Set defaults
 GOST_SERVER_HOSTNAME="${GOST_SERVER_HOSTNAME:-${GOST_SERVER_ADDRESS%%:*}}"
 GOST_LOCAL_PORT="${GOST_LOCAL_PORT:-1080}"
+GOST_HTTP_PORT="${GOST_HTTP_PORT:-8080}"
 
 echo "=== Starting GOST Client ==="
 echo "Server: $GOST_SERVER_ADDRESS"
 echo "Local SOCKS5: localhost:$GOST_LOCAL_PORT"
+echo "Local HTTP/HTTPS: localhost:$GOST_HTTP_PORT"
 echo ""
 
 # Substitute environment variables in config

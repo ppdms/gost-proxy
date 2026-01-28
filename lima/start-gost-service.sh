@@ -39,6 +39,17 @@ fi
 echo "Waiting for VM to be ready..."
 sleep 3
 
+# Detect vzNAT IP address for NTP forwarder
+echo "Detecting vzNAT interface IP..."
+VZNAT_IP=$(limactl shell "$VM_NAME" ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+if [ -z "$VZNAT_IP" ]; then
+    echo "Warning: Could not detect vzNAT IP, NTP forwarding may not work"
+    VZNAT_IP="192.168.105.2"  # fallback
+else
+    echo "✓ vzNAT IP: $VZNAT_IP"
+fi
+export VZNAT_IP
+
 # Install Go if not present in VM
 if ! limactl shell "$VM_NAME" bash -c "command -v go" &>/dev/null; then
     echo "Installing Go in VM..."
@@ -137,7 +148,7 @@ GOST_SERVER_ADDRESS="${GOST_SERVER_ADDRESS:-proxy.example.com:443}"
 GOST_SERVER_HOSTNAME="${GOST_SERVER_HOSTNAME:-${GOST_SERVER_ADDRESS%%:*}}"
 
 # Create config with substituted values using centralized config
-export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET GOST_SERVER_ADDRESS GOST_SERVER_HOSTNAME
+export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET GOST_SERVER_ADDRESS GOST_SERVER_HOSTNAME VZNAT_IP
 envsubst < "$PROJECT_ROOT/client/config.yaml" > /tmp/gost-config-subst.yaml
 
 # Copy config to VM
@@ -193,24 +204,92 @@ if limactl shell "$VM_NAME" systemctl is-active gost.service &>/dev/null; then
     echo "✓ System service running as user '$USER'"
     echo "✓ SOCKS5 proxy available at localhost:1080"
     
-    # Enable and start the post-GOST upgrade service (if it exists and isn't already enabled)
-    if limactl shell "$VM_NAME" bash -c "[ -f /etc/systemd/system/upgrade-after-gost.service ]" 2>/dev/null; then
-        if ! limactl shell "$VM_NAME" systemctl is-enabled upgrade-after-gost.service &>/dev/null; then
-            echo ""
-            echo "Enabling automatic package upgrades after GOST startup..."
-            limactl shell "$VM_NAME" sudo systemctl enable upgrade-after-gost.service
-            limactl shell "$VM_NAME" sudo systemctl start upgrade-after-gost.service &
-            echo "✓ Package upgrade service enabled (running in background)"
-        fi
-    fi
+    # Configure apt to use GOST proxy and run upgrades in background
+    echo ""
+    echo "Setting up apt to use GOST proxy..."
+    limactl shell "$VM_NAME" bash << 'APTSETUP'
+set -e
+
+# Configure apt to use SOCKS5 proxy
+sudo tee /etc/apt/apt.conf.d/80proxy > /dev/null << 'EOF'
+Acquire::http::Proxy "socks5h://127.0.0.1:1080";
+Acquire::https::Proxy "socks5h://127.0.0.1:1080";
+EOF
+
+echo "✓ Apt configured to use GOST proxy"
+
+# Create background upgrade script
+sudo tee /usr/local/bin/upgrade-via-proxy.sh > /dev/null << 'EOF'
+#!/bin/bash
+set -e
+
+echo "=== Package Management via GOST Proxy ==="
+echo "Starting package operations through tunnel..."
+
+# Update package lists
+apt-get update
+
+# Upgrade all packages for security
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+# Install unattended-upgrades, chrony for NTP
+apt-get install -y --no-install-recommends \
+  unattended-upgrades \
+  apt-listchanges \
+  chrony
+
+# Configure unattended-upgrades for automatic security updates
+cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UNATTENDED'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}";
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+UNATTENDED
+
+# Enable automatic security updates
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUTOUPGRADES'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+AUTOUPGRADES
+
+# Configure chrony to use GOST NTP forwarder on vzNAT interface
+VZNAT_IP=$(ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+cat > /etc/chrony/sources.d/gost-ntp.sources << CHRONYSRC
+server ${VZNAT_IP} iburst
+CHRONYSRC
+
+systemctl restart chrony
+
+echo "✓ Package upgrades complete with automatic updates and NTP enabled"
+EOF
+
+sudo chmod +x /usr/local/bin/upgrade-via-proxy.sh
+
+# Run upgrade in background (redirect to journal via systemd-cat)
+echo "Starting package upgrade in background (through GOST tunnel)..."
+nohup sudo bash -c '/usr/local/bin/upgrade-via-proxy.sh 2>&1 | systemd-cat -t upgrade-via-proxy' > /dev/null 2>&1 &
+
+echo "✓ Background upgrade started (check: journalctl -t upgrade-via-proxy -f)"
+APTSETUP
+
+    echo "✓ Apt proxy configured, upgrades/chrony setup running in background"
     
     echo ""
     echo "Commands:"
     echo "  Status:     limactl shell $VM_NAME sudo systemctl status gost.service"
     echo "  Logs:       limactl shell $VM_NAME sudo journalctl -u gost.service -f"
+    echo "  Upgrade:    limactl shell $VM_NAME sudo journalctl -t upgrade-via-proxy -f"
+    echo "  NTP:        limactl shell $VM_NAME sudo chronyc tracking"
     echo "  Stop:       limactl shell $VM_NAME sudo systemctl stop gost.service"
     echo "  Restart:    limactl shell $VM_NAME sudo systemctl restart gost.service"
-    echo "  Disable:    limactl shell $VM_NAME sudo systemctl disable gost.service"
     echo "  Test:       curl --socks5-hostname localhost:1080 https://ifconfig.me"
 else
     echo "✗ Failed to start GOST service"

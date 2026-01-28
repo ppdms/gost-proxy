@@ -21,21 +21,20 @@ images:
 
 # Resource allocation
 cpus: 2
-memory: "1GiB"
-disk: "10GiB"
-
-# Mount host directories
-mounts:
-  - location: "~"
-    writable: false
-  - location: "/tmp/lima"
-    writable: true
+memory: "2GiB"
+disk: "5GiB"
 
 # SSH configuration
 ssh:
   localPort: 0
   loadDotSSHPubKeys: true
   forwardAgent: false
+
+# Networks: user-mode for internet (via Zscaler), vzNAT for host-VM communication
+networks:
+  - lima: user-v2
+  - vzNAT: true
+    interface: "vznat0"
 
 # Port forwarding: SOCKS5 proxy on 1080
 portForwards:
@@ -52,12 +51,13 @@ caCerts:
     - /tmp/zscaler-root.crt
   certs: []
 
-# Don't upgrade packages on boot - provision scripts will handle it
+# Don't upgrade packages on boot - this should prevent cloud-init from doing apt operations
 upgradePackages: false
 
 # No containerd needed for this VM
 containerd:
   system: false
+  user: false
 
 # Provisioning scripts (idempotent)
 provision:
@@ -66,126 +66,27 @@ provision:
       #!/bin/bash
       set -eux -o pipefail
       
-      # Wait a moment for CA certificates to be fully processed
-      sleep 2
+      # Disable systemd-timesyncd to avoid NTP timeout delays
+      systemctl disable --now systemd-timesyncd || true
       
-      # Update CA certificates (Lima should have already copied zscaler-root.crt)
-      update-ca-certificates
+      # Ensure user-mode network (eth0) is default route, not vzNAT
+      # Set vznat0 default route metric to eth0 + 100 if it exists
+      ETH0_METRIC=$(ip route show default dev eth0 | grep -oP 'metric \K[0-9]+' | head -1)
+      ETH0_METRIC=${ETH0_METRIC:-100}
+      VZNAT_METRIC=$((ETH0_METRIC + 100))
       
-      # List installed CAs to verify
-      ls -la /usr/local/share/ca-certificates/ || true
-      
-      echo "✓ CA certificates updated"
-
-  - mode: system
-    script: |
-      #!/bin/bash
-      set -eux -o pipefail
-      
-      # Replace HTTP URLs with HTTPS in sources (required for Zscaler)
-      # Zscaler blocks plain HTTP but allows HTTPS
-      sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
-      
-      # Update package lists
-      apt-get update
-      
-      # Install build dependencies and security packages
-      apt-get install -y git wget build-essential curl ca-certificates \
-                         iptables unattended-upgrades apt-listchanges
-      
-      echo "✓ Build dependencies installed"
-
-  - mode: system
-    script: |
-      #!/bin/bash
-      set -eux -o pipefail
-      
-      # Configure Git to use system CA bundle (including Zscaler cert)
-      git config --system http.sslCAInfo /etc/ssl/certs/ca-certificates.crt
-      
-      echo "✓ Git configured to use system CA certificates"
-
-  - mode: system
-    script: |
-      #!/bin/bash
-      set -eux -o pipefail
-      
-      # Configure unattended-upgrades for automatic security updates
-      cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
-      Unattended-Upgrade::Allowed-Origins {
-          "${distro_id}:${distro_codename}";
-          "${distro_id}:${distro_codename}-security";
-          "${distro_id}ESMApps:${distro_codename}-apps-security";
-          "${distro_id}ESM:${distro_codename}-infra-security";
-      };
-      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-      Unattended-Upgrade::MinimalSteps "true";
-      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-      Unattended-Upgrade::Remove-Unused-Dependencies "true";
-      Unattended-Upgrade::Automatic-Reboot "false";
-      EOF
-      
-      # Enable automatic security updates
-      cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-      APT::Periodic::Update-Package-Lists "1";
-      APT::Periodic::Unattended-Upgrade "1";
-      APT::Periodic::AutocleanInterval "7";
-      EOF
-      
-      echo "✓ Automatic security updates configured"
-
-  - mode: system
-    script: |
-      #!/bin/bash
-      set -eux -o pipefail
-      
-      # Create upgrade script to run after GOST is configured
-      cat > /usr/local/bin/upgrade-after-gost.sh <<'EOF'
-      #!/bin/bash
-      set -e
-      
-      # Wait for GOST service to be running and stable
-      echo "Waiting for GOST service to be ready..."
-      for i in {1..30}; do
-        if systemctl is-active gost.service >/dev/null 2>&1; then
-          echo "GOST service is running"
-          sleep 5  # Give it a moment to stabilize
-          break
+      if ip link show vznat0 &>/dev/null; then
+        VZNAT_GW=$(ip route show default dev vznat0 | grep -oP '(?<=via )[0-9.]+' | head -1)
+        if [ -n "$VZNAT_GW" ]; then
+          ip route del default via "$VZNAT_GW" dev vznat0 2>/dev/null || true
+          ip route add default via "$VZNAT_GW" dev vznat0 metric "$VZNAT_METRIC" 2>/dev/null || true
+          echo "✓ Set vznat0 default route metric to $VZNAT_METRIC (eth0: $ETH0_METRIC)"
         fi
-        sleep 2
-      done
+      fi
       
-      # Now upgrade packages
-      echo "Upgrading packages..."
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-      
-      echo "Package upgrade complete"
-      EOF
-      
-      chmod +x /usr/local/bin/upgrade-after-gost.sh
-      
-      # Create systemd service to run upgrade after GOST is up
-      cat > /etc/systemd/system/upgrade-after-gost.service <<'EOF'
-      [Unit]
-      Description=Upgrade packages after GOST is configured
-      After=gost.service
-      Wants=gost.service
-      
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/bin/upgrade-after-gost.sh
-      RemainAfterExit=yes
-      
-      [Install]
-      WantedBy=multi-user.target
-      EOF
-      
-      systemctl daemon-reload
-      
-      echo "✓ Post-GOST upgrade service configured"
+      echo "✓ Minimal provisioning complete"
 
-# Probe scripts to check readiness
+# Probes scripts to check readiness
 probes:
   - mode: readiness
     description: systemd

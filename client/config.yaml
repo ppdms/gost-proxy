@@ -12,6 +12,14 @@ services:
     listener:
       type: tcp
 
+  - name: local-http-proxy
+    addr: :8080
+    handler:
+      type: http
+      chain: cloudflare-chain
+    listener:
+      type: tcp
+
   - name: nextcloud-forward
     addr: :7777
     handler:
@@ -23,6 +31,20 @@ services:
       nodes:
         - name: nextcloud-server
           addr: nextcloud.lan:7777
+
+  - name: ntp-forward
+    addr: ${VZNAT_IP}:123
+    handler:
+      type: udp
+      chain: cloudflare-chain
+    listener:
+      type: udp
+    forwarder:
+      nodes:
+        - name: ntp-cloudflare
+          addr: time.cloudflare.com:123
+        - name: ntp-google
+          addr: time.google.com:123
 
 chains:
   - name: cloudflare-chain
