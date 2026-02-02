@@ -65,25 +65,22 @@ provision:
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      
+
       # Disable systemd-timesyncd to avoid NTP timeout delays
       systemctl disable --now systemd-timesyncd || true
-      
-      # Ensure user-mode network (eth0) is default route, not vzNAT
-      # Set vznat0 default route metric to eth0 + 100 if it exists
-      ETH0_METRIC=$(ip route show default dev eth0 | grep -oP 'metric \K[0-9]+' | head -1)
-      ETH0_METRIC=${ETH0_METRIC:-100}
-      VZNAT_METRIC=$((ETH0_METRIC + 100))
-      
-      if ip link show vznat0 &>/dev/null; then
-        VZNAT_GW=$(ip route show default dev vznat0 | grep -oP '(?<=via )[0-9.]+' | head -1)
-        if [ -n "$VZNAT_GW" ]; then
-          ip route del default via "$VZNAT_GW" dev vznat0 2>/dev/null || true
-          ip route add default via "$VZNAT_GW" dev vznat0 metric "$VZNAT_METRIC" 2>/dev/null || true
-          echo "✓ Set vznat0 default route metric to $VZNAT_METRIC (eth0: $ETH0_METRIC)"
-        fi
-      fi
-      
+
+      # Configure vznat0 with high route metric via netplan so eth0 (user-v2) is preferred
+      # This persists across DHCP renewals unlike manual ip route commands
+      printf '%s\n' 'network:' '  version: 2' '  ethernets:' '    vznat0:' '      dhcp4: true' '      dhcp4-overrides:' '        route-metric: 300' > /etc/netplan/90-vznat-metric.yaml
+      chmod 600 /etc/netplan/90-vznat-metric.yaml
+
+      # Apply netplan config
+      netplan apply || true
+
+      # Remove any existing vznat0 default route with low metric
+      ip route del default dev vznat0 2>/dev/null || true
+
+      echo "✓ Configured vznat0 with high route metric (300) via netplan"
       echo "✓ Minimal provisioning complete"
 
 # Probes scripts to check readiness
