@@ -9,6 +9,77 @@ VM_NAME="gost"
 
 echo "=== Starting GOST Service ==="
 
+# Check .env exists and read configuration
+if [ ! -f "$PROJECT_ROOT/client/.env" ]; then
+    echo "ERROR: $PROJECT_ROOT/client/.env not found"
+    echo "Copy .env.example and fill in your credentials"
+    exit 1
+fi
+
+# Read .env to detect servers and their ports
+source "$PROJECT_ROOT/client/.env"
+SERVERS=($(set | grep -E '^SERVER[0-9]+_CF_CLIENT_ID=' | sed 's/^SERVER\([0-9]*\)_CF_CLIENT_ID=.*/\1/' | sort -n))
+
+if [ ${#SERVERS[@]} -eq 0 ]; then
+    echo "ERROR: No servers configured in .env file"
+    echo "Define at least one server using SERVER1_CF_CLIENT_ID, SERVER1_CF_CLIENT_SECRET, etc."
+    exit 1
+fi
+
+echo "Detected ${#SERVERS[@]} server(s), generating Lima VM configuration..."
+
+# Collect all unique ports from configured servers
+PORTS=()
+for i in "${SERVERS[@]}"; do
+    PORT_VAR="SERVER${i}_LOCAL_PORT"
+    PORT="${!PORT_VAR}"
+    if [ -n "$PORT" ]; then
+        PORTS+=("$PORT")
+    fi
+done
+
+# Add HTTP proxy port if enabled
+if [ "$ENABLE_HTTP_PROXY" = "true" ]; then
+    HTTP_PORT="${HTTP_PROXY_PORT:-8080}"
+    PORTS+=("$HTTP_PORT")
+fi
+
+# Add Nextcloud ports if configured
+if [ -n "$NEXTCLOUD_HOST" ]; then
+    NC_HTTP="${NEXTCLOUD_HTTP_PORT:-80}"
+    NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
+    PORTS+=("$NC_HTTP" "$NC_HTTPS")
+fi
+
+# Generate lima-gost.yaml from template with dynamic port forwards
+LIMA_CONFIG="$SCRIPT_DIR/lima-gost.yaml"
+if [ -f "$SCRIPT_DIR/lima-gost.yaml.template" ]; then
+    # Write everything before the placeholder
+    sed '/# PORTFORWARDS_PLACEHOLDER/q' "$SCRIPT_DIR/lima-gost.yaml.template" | head -n -1 > "$LIMA_CONFIG"
+    
+    # Write port forwards section
+    cat >> "$LIMA_CONFIG" << 'PORTFORWARDS_START'
+portForwards:
+  - guestSocket: "/tmp/gost.sock"
+    hostSocket: "/tmp/gost.sock"
+PORTFORWARDS_START
+    
+    for port in "${PORTS[@]}"; do
+        cat >> "$LIMA_CONFIG" << PORTFORWARD_ENTRY
+  - guestPort: ${port}
+    hostPort: ${port}
+    proto: tcp
+PORTFORWARD_ENTRY
+    done
+    
+    # Write everything after the placeholder
+    sed -n '/# PORTFORWARDS_PLACEHOLDER/,$p' "$SCRIPT_DIR/lima-gost.yaml.template" | tail -n +2 >> "$LIMA_CONFIG"
+    
+    echo "✓ Generated Lima config with port forwards: ${PORTS[*]}"
+else
+    echo "Warning: lima-gost.yaml.template not found, using existing lima-gost.yaml"
+fi
+
 # Extract Zscaler CA certificate from macOS keychain if needed
 if [[ "$OSTYPE" == "darwin"* ]]; then
     if security find-certificate -c "Zscaler Root CA" -p /Library/Keychains/System.keychain > /tmp/zscaler-root.crt 2>/dev/null; then
@@ -134,26 +205,171 @@ if [ ! -f "$PROJECT_ROOT/client/.env" ]; then
     exit 1
 fi
 
-# Load credentials from centralized .env
-source "$PROJECT_ROOT/client/.env"
+# Copy the entire client directory to VM for dynamic config generation
+echo "Copying client configuration to VM..."
+limactl shell "$VM_NAME" mkdir -p /tmp/gost-client
+limactl copy "$PROJECT_ROOT/client/.env" "$VM_NAME:/tmp/gost-client/"
+limactl copy "$PROJECT_ROOT/client/start.sh" "$VM_NAME:/tmp/gost-client/"
 
-# Check required variables
-if [ -z "$CF_ACCESS_CLIENT_ID" ] || [ -z "$CF_ACCESS_CLIENT_SECRET" ]; then
-    echo "ERROR: Missing Cloudflare Access credentials in .env"
+# Detect configured servers for validation
+source "$PROJECT_ROOT/client/.env"
+SERVERS=($(set | grep -E '^SERVER[0-9]+_CF_CLIENT_ID=' | sed 's/^SERVER\([0-9]*\)_CF_CLIENT_ID=.*/\1/' | sort -n))
+
+if [ ${#SERVERS[@]} -eq 0 ]; then
+    echo "ERROR: No servers configured in .env file"
+    echo "Define at least one server using SERVER1_CF_CLIENT_ID, SERVER1_CF_CLIENT_SECRET, etc."
     exit 1
 fi
 
-# Set defaults
-GOST_SERVER_ADDRESS="${GOST_SERVER_ADDRESS:-proxy.example.com:443}"
-GOST_SERVER_HOSTNAME="${GOST_SERVER_HOSTNAME:-${GOST_SERVER_ADDRESS%%:*}}"
+echo "✓ Found ${#SERVERS[@]} server(s) configured"
 
-# Create config with substituted values using centralized config
-export CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET GOST_SERVER_ADDRESS GOST_SERVER_HOSTNAME VZNAT_IP
-envsubst < "$PROJECT_ROOT/client/config.yaml" > /tmp/gost-config-subst.yaml
+# Generate the config dynamically in the VM
+echo "Generating configuration in VM..."
+limactl shell "$VM_NAME" bash << 'GENCONFIG'
+#!/bin/bash
+set -e
 
-# Copy config to VM
-limactl copy /tmp/gost-config-subst.yaml "$VM_NAME:/tmp/gost-config.yaml"
-rm -f /tmp/gost-config-subst.yaml
+cd /tmp/gost-client
+
+# Source the .env file
+source .env
+
+# Detect all configured servers
+SERVERS=($(set | grep -E '^SERVER[0-9]+_CF_CLIENT_ID=' | sed 's/^SERVER\([0-9]*\)_CF_CLIENT_ID=.*/\1/' | sort -n))
+
+# Generate config
+cat > /tmp/gost-config.yaml <<'EOF'
+# GOST v3 Configuration (auto-generated)
+services:
+EOF
+
+# Generate a service for each server
+for i in "${SERVERS[@]}"; do
+    CF_ID_VAR="SERVER${i}_CF_CLIENT_ID"
+    CF_SECRET_VAR="SERVER${i}_CF_CLIENT_SECRET"
+    ADDR_VAR="SERVER${i}_ADDRESS"
+    HOSTNAME_VAR="SERVER${i}_HOSTNAME"
+    PORT_VAR="SERVER${i}_LOCAL_PORT"
+    
+    CF_ID="${!CF_ID_VAR}"
+    CF_SECRET="${!CF_SECRET_VAR}"
+    ADDRESS="${!ADDR_VAR}"
+    HOSTNAME="${!HOSTNAME_VAR:-${ADDRESS%%:*}}"
+    LOCAL_PORT="${!PORT_VAR}"
+    
+    cat >> /tmp/gost-config.yaml <<SERVICEEOF
+  - name: socks5-server${i}
+    addr: :${LOCAL_PORT}
+    handler:
+      type: socks5
+      chain: chain-server${i}
+      metadata:
+        udp: true
+    listener:
+      type: tcp
+
+SERVICEEOF
+done
+
+# Add HTTP proxy if enabled
+if [ "$ENABLE_HTTP_PROXY" = "true" ]; then
+    HTTP_PORT="${HTTP_PROXY_PORT:-8080}"
+    FIRST_SERVER="${SERVERS[0]}"
+    
+    cat >> /tmp/gost-config.yaml <<SERVICEEOF
+  - name: local-http-proxy
+    addr: :${HTTP_PORT}
+    handler:
+      type: http
+      chain: chain-server${FIRST_SERVER}
+    listener:
+      type: tcp
+
+SERVICEEOF
+fi
+
+# Add Nextcloud forwards if configured
+if [ -n "$NEXTCLOUD_HOST" ]; then
+    NC_HTTP="${NEXTCLOUD_HTTP_PORT:-80}"
+    NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
+    FIRST_SERVER="${SERVERS[0]}"
+    
+    cat >> /tmp/gost-config.yaml <<SERVICEEOF
+  - name: nextcloud-forward-http
+    addr: :${NC_HTTP}
+    handler:
+      type: tcp
+      chain: chain-server${FIRST_SERVER}
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+        - name: nextcloud-server
+          addr: ${NEXTCLOUD_HOST}:80
+
+  - name: nextcloud-forward-https
+    addr: :${NC_HTTPS}
+    handler:
+      type: tcp
+      chain: chain-server${FIRST_SERVER}
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+        - name: nextcloud-server
+          addr: ${NEXTCLOUD_HOST}:443
+
+SERVICEEOF
+fi
+
+# Generate chains section
+cat >> /tmp/gost-config.yaml <<'EOF'
+
+chains:
+EOF
+
+# Generate a chain for each server
+for i in "${SERVERS[@]}"; do
+    CF_ID_VAR="SERVER${i}_CF_CLIENT_ID"
+    CF_SECRET_VAR="SERVER${i}_CF_CLIENT_SECRET"
+    ADDR_VAR="SERVER${i}_ADDRESS"
+    HOSTNAME_VAR="SERVER${i}_HOSTNAME"
+    
+    CF_ID="${!CF_ID_VAR}"
+    CF_SECRET="${!CF_SECRET_VAR}"
+    ADDRESS="${!ADDR_VAR}"
+    HOSTNAME="${!HOSTNAME_VAR:-${ADDRESS%%:*}}"
+    
+    cat >> /tmp/gost-config.yaml <<CHAINEOF
+  - name: chain-server${i}
+    hops:
+      - name: hop-server${i}
+        nodes:
+          - name: node-server${i}
+            addr: ${ADDRESS}
+            connector:
+              type: http
+            dialer:
+              type: wss
+              tls:
+                serverName: ${HOSTNAME}
+              metadata:
+                header:
+                  CF-Access-Client-Id: "${CF_ID}"
+                  CF-Access-Client-Secret: "${CF_SECRET}"
+
+CHAINEOF
+done
+
+# Add logging configuration
+cat >> /tmp/gost-config.yaml <<'EOF'
+log:
+  level: info
+  output: stderr
+EOF
+
+echo "✓ Configuration generated with ${#SERVERS[@]} server(s)"
+GENCONFIG
 
 # Install systemd service if not exists
 if ! limactl shell "$VM_NAME" systemctl is-enabled gost.service &>/dev/null; then
@@ -202,7 +418,33 @@ sleep 2
 if limactl shell "$VM_NAME" systemctl is-active gost.service &>/dev/null; then
     echo "✓ GOST service started successfully"
     echo "✓ System service running as user '$USER'"
-    echo "✓ SOCKS5 proxy available at localhost:1080"
+    
+    # Show available proxies
+    echo ""
+    echo "Available SOCKS5 proxies:"
+    for i in "${SERVERS[@]}"; do
+        PORT_VAR="SERVER${i}_LOCAL_PORT"
+        LOCAL_PORT="${!PORT_VAR}"
+        ADDR_VAR="SERVER${i}_ADDRESS"
+        ADDRESS="${!ADDR_VAR}"
+        echo "  Server $i: localhost:$LOCAL_PORT (→ $ADDRESS)"
+    done
+    
+    if [ "$ENABLE_HTTP_PROXY" = "true" ]; then
+        HTTP_PORT="${HTTP_PROXY_PORT:-8080}"
+        echo ""
+        echo "HTTP/HTTPS Proxy:"
+        echo "  localhost:$HTTP_PORT"
+    fi
+    
+    if [ -n "$NEXTCLOUD_HOST" ]; then
+        NC_HTTP="${NEXTCLOUD_HTTP_PORT:-80}"
+        NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
+        echo ""
+        echo "Nextcloud Forwards:"
+        echo "  HTTP:  localhost:$NC_HTTP → $NEXTCLOUD_HOST:80"
+        echo "  HTTPS: localhost:$NC_HTTPS → $NEXTCLOUD_HOST:443"
+    fi
     
     # Configure apt to use GOST proxy and run upgrades in background
     echo ""
@@ -290,7 +532,13 @@ APTSETUP
     echo "  NTP:        limactl shell $VM_NAME sudo chronyc tracking"
     echo "  Stop:       limactl shell $VM_NAME sudo systemctl stop gost.service"
     echo "  Restart:    limactl shell $VM_NAME sudo systemctl restart gost.service"
-    echo "  Test:       curl --socks5-hostname localhost:1080 https://ifconfig.me"
+    echo ""
+    echo "Test proxies:"
+    echo "  SOCKS5:     curl --socks5-hostname localhost:1080 https://ifconfig.me"
+    if [ "$ENABLE_HTTP_PROXY" = "true" ]; then
+        HTTP_PORT="${HTTP_PROXY_PORT:-8080}"
+        echo "  HTTP:       curl --proxy http://localhost:$HTTP_PORT https://ifconfig.me"
+    fi
 else
     echo "✗ Failed to start GOST service"
     echo "Check status: limactl shell $VM_NAME sudo systemctl status gost.service"

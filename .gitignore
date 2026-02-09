@@ -30,3 +30,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Generated files
+lima/lima-gost.yaml

@@ -6,6 +6,7 @@ This project provides a GOST v3 proxy setup optimized for working behind Cloudfl
 
 - **WSS Protocol**: Uses WebSockets over TLS to bypass buffering proxies (Zscaler)
 - **Cloudflare Access Integration**: Authenticates using Service Tokens via HTTP headers
+- **Multiple Servers**: Connect to N different GOST servers simultaneously, each with its own credentials
 - **Lima VM Client**: macOS client runs in Ubuntu VM with systemd service for isolation
 - **Nix Flake**: Reproducible environment and system integration
 - **Zscaler Support**: Automatic CA extraction and installation for corporate proxies
@@ -39,10 +40,11 @@ cd lima
 ```
 
 The script will automatically:
+- Detect configured servers from .env
+- Generate Lima VM config with required port forwards
 - Create and start Lima VM if needed
 - Install standard GOST v3
 - Set up and start the systemd service
-- Configure port forwarding for SOCKS5 proxy on localhost:1080
 
 ## Project Structure
 
@@ -52,21 +54,47 @@ gost-proxy/
 ├── QUICKREF.sh           # Quick reference commands
 ├── README.md             # This file
 ├── client/               # Client configuration
-│   ├── config.yaml       # GOST client config (uses env vars)
+│   ├── .env.example      # Environment template
 │   ├── .env              # Credentials (create from template)
-│   └── start.sh          # Direct start script
+│   └── start.sh          # Client start script
 ├── server/               # Server configuration (Docker)
 │   ├── config.yaml       # GOST server config
 │   └── start.sh          # Docker start script
 └── lima/                 # Lima VM client files (macOS)
-    ├── lima-gost.yaml    # VM configuration
+    ├── lima-gost.yaml.template  # VM configuration template
+    ├── lima-gost.yaml    # Generated VM config (auto-created)
     ├── start-gost-service.sh  # Main service manager
     └── stop-gost-service.sh   # Service stopper
 ```
 
 ## Configuration
 
-### Client Configuration (YAML)
+### Configuration
+
+The client supports connecting to multiple GOST servers simultaneously. Each server gets its own:
+- Cloudflare Access credentials
+- Server address
+- Local SOCKS5 port
+
+Configure in `.env`:
+
+```bash
+# Server 1
+SERVER1_CF_CLIENT_ID=xxxxx.access
+SERVER1_CF_CLIENT_SECRET=xxxxx
+SERVER1_ADDRESS=proxy1.example.com:443
+SERVER1_LOCAL_PORT=1081
+
+# Server 2
+SERVER2_CF_CLIENT_ID=yyyyy.access
+SERVER2_CF_CLIENT_SECRET=yyyyy
+SERVER2_ADDRESS=proxy2.example.com:443
+SERVER2_LOCAL_PORT=1082
+
+# Add more as needed (SERVER3_, SERVER4_, ...)
+```
+
+### Example Client Configuration (YAML)
 
 ```yaml
 services:

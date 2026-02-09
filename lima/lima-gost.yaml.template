@@ -36,13 +36,9 @@ networks:
   - vzNAT: true
     interface: "vznat0"
 
-# Port forwarding: SOCKS5 proxy on 1080
-portForwards:
-  - guestSocket: "/tmp/gost.sock"
-    hostSocket: "/tmp/gost.sock"
-  - guestPort: 1080
-    hostPort: 1080
-    proto: tcp
+# Port forwarding: Dynamically generated based on .env configuration
+# This section will be filled in by start-gost-service.sh
+# PORTFORWARDS_PLACEHOLDER
 
 # CA Certificates - Lima copies these before provisioning
 caCerts:

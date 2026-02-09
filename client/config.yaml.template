@@ -1,0 +1,10 @@
+# GOST v3 Client Configuration Template
+# This file is used as a base - services and chains are dynamically generated
+# by start.sh based on the .env configuration
+
+# Static configuration sections (optional forwarders, etc.)
+# Dynamic services and chains will be appended by start.sh
+
+log:
+  level: info
+  output: stderr

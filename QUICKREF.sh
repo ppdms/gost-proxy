@@ -21,10 +21,9 @@ cd client && ./start.sh
 
 🔧 CONFIGURATION
 ──────────────────────────────────────────────────────────────────
-Credentials:     client/.env (create this file with your CF Access tokens)
-Client Config:   client/config.yaml
+Credentials:     client/.env (create from .env.example)
 Server Config:   server/config.yaml
-VM Config:       lima/lima-gost.yaml
+VM Config:       lima/lima-gost.yaml.template (auto-generated to lima-gost.yaml)
 
 🧪 TESTING
 ──────────────────────────────────────────────────────────────────
