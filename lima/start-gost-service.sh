@@ -29,26 +29,34 @@ fi
 echo "Detected ${#SERVERS[@]} server(s), generating Lima VM configuration..."
 
 # Collect all unique ports from configured servers
-PORTS=()
+TCP_PORTS=()
+UDP_PORTS=()
+
 for i in "${SERVERS[@]}"; do
     PORT_VAR="SERVER${i}_LOCAL_PORT"
     PORT="${!PORT_VAR}"
     if [ -n "$PORT" ]; then
-        PORTS+=("$PORT")
+        TCP_PORTS+=("$PORT")
     fi
 done
 
 # Add HTTP proxy port if enabled
 if [ "$ENABLE_HTTP_PROXY" = "true" ]; then
     HTTP_PORT="${HTTP_PROXY_PORT:-8080}"
-    PORTS+=("$HTTP_PORT")
+    TCP_PORTS+=("$HTTP_PORT")
 fi
 
 # Add Nextcloud ports if configured
 if [ -n "$NEXTCLOUD_HOST" ]; then
     NC_HTTP="${NEXTCLOUD_HTTP_PORT:-80}"
     NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
-    PORTS+=("$NC_HTTP" "$NC_HTTPS")
+    TCP_PORTS+=("$NC_HTTP" "$NC_HTTPS")
+fi
+
+# Add SSH forward port if configured
+if [ -n "$SSH_FORWARD_HOST" ]; then
+    SSH_LOCAL="${SSH_FORWARD_LOCAL_PORT:-2222}"
+    TCP_PORTS+=("$SSH_LOCAL")
 fi
 
 # Generate lima-gost.yaml from template with dynamic port forwards
@@ -63,19 +71,29 @@ portForwards:
   - guestSocket: "/tmp/gost.sock"
     hostSocket: "/tmp/gost.sock"
 PORTFORWARDS_START
-    
-    for port in "${PORTS[@]}"; do
+
+    # Add TCP port forwards
+    for port in "${TCP_PORTS[@]}"; do
         cat >> "$LIMA_CONFIG" << PORTFORWARD_ENTRY
   - guestPort: ${port}
     hostPort: ${port}
     proto: tcp
 PORTFORWARD_ENTRY
     done
-    
+
+    # Add UDP port forwards
+    for port in "${UDP_PORTS[@]}"; do
+        cat >> "$LIMA_CONFIG" << PORTFORWARD_ENTRY
+  - guestPort: ${port}
+    hostPort: ${port}
+    proto: udp
+PORTFORWARD_ENTRY
+    done
+
     # Write everything after the placeholder
     sed -n '/# PORTFORWARDS_PLACEHOLDER/,$p' "$SCRIPT_DIR/lima-gost.yaml.template" | tail -n +2 >> "$LIMA_CONFIG"
-    
-    echo "✓ Generated Lima config with port forwards: ${PORTS[*]}"
+
+    echo "✓ Generated Lima config with TCP ports: ${TCP_PORTS[*]}, UDP ports: ${UDP_PORTS[*]}"
 else
     echo "Warning: lima-gost.yaml.template not found, using existing lima-gost.yaml"
 fi
@@ -110,16 +128,16 @@ fi
 echo "Waiting for VM to be ready..."
 sleep 3
 
-# Detect vzNAT IP address for NTP forwarder
-echo "Detecting vzNAT interface IP..."
-VZNAT_IP=$(limactl shell "$VM_NAME" ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-if [ -z "$VZNAT_IP" ]; then
-    echo "Warning: Could not detect vzNAT IP, NTP forwarding may not work"
-    VZNAT_IP="192.168.105.2"  # fallback
-else
-    echo "✓ vzNAT IP: $VZNAT_IP"
-fi
-export VZNAT_IP
+# Detect vzNAT IP address (NTP functionality disabled due to Lima bug #4666)
+# echo "Detecting vzNAT interface IP..."
+# VZNAT_IP=$(limactl shell "$VM_NAME" ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+# if [ -z "$VZNAT_IP" ]; then
+#     echo "Warning: Could not detect vzNAT IP, NTP forwarding may not work"
+#     VZNAT_IP="192.168.105.2"  # fallback
+# else
+#     echo "✓ vzNAT IP: $VZNAT_IP"
+# fi
+# export VZNAT_IP
 
 # Install Go if not present in VM
 if ! limactl shell "$VM_NAME" bash -c "command -v go" &>/dev/null; then
@@ -293,7 +311,7 @@ if [ -n "$NEXTCLOUD_HOST" ]; then
     NC_HTTP="${NEXTCLOUD_HTTP_PORT:-80}"
     NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
     FIRST_SERVER="${SERVERS[0]}"
-    
+
     cat >> /tmp/gost-config.yaml <<SERVICEEOF
   - name: nextcloud-forward-http
     addr: :${NC_HTTP}
@@ -318,6 +336,28 @@ if [ -n "$NEXTCLOUD_HOST" ]; then
       nodes:
         - name: nextcloud-server
           addr: ${NEXTCLOUD_HOST}:443
+
+SERVICEEOF
+fi
+
+# Add SSH forward if configured
+if [ -n "$SSH_FORWARD_HOST" ]; then
+    SSH_LOCAL="${SSH_FORWARD_LOCAL_PORT:-2222}"
+    SSH_REMOTE="${SSH_FORWARD_REMOTE_PORT:-22}"
+    FIRST_SERVER="${SERVERS[0]}"
+
+    cat >> /tmp/gost-config.yaml <<SERVICEEOF
+  - name: ssh-forward
+    addr: :${SSH_LOCAL}
+    handler:
+      type: tcp
+      chain: chain-server${FIRST_SERVER}
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+        - name: ssh-target
+          addr: ${SSH_FORWARD_HOST}:${SSH_REMOTE}
 
 SERVICEEOF
 fi
@@ -445,7 +485,15 @@ if limactl shell "$VM_NAME" systemctl is-active gost.service &>/dev/null; then
         echo "  HTTP:  localhost:$NC_HTTP → $NEXTCLOUD_HOST:80"
         echo "  HTTPS: localhost:$NC_HTTPS → $NEXTCLOUD_HOST:443"
     fi
-    
+
+    if [ -n "$SSH_FORWARD_HOST" ]; then
+        SSH_LOCAL="${SSH_FORWARD_LOCAL_PORT:-2222}"
+        SSH_REMOTE="${SSH_FORWARD_REMOTE_PORT:-22}"
+        echo ""
+        echo "SSH Forward:"
+        echo "  localhost:$SSH_LOCAL → $SSH_FORWARD_HOST:$SSH_REMOTE"
+    fi
+
     # Configure apt to use GOST proxy and run upgrades in background
     echo ""
     echo "Setting up apt to use GOST proxy..."
@@ -474,11 +522,10 @@ apt-get update
 # Upgrade all packages for security
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-# Install unattended-upgrades, chrony for NTP
+# Install unattended-upgrades (chrony disabled due to Lima bug #4666)
 apt-get install -y --no-install-recommends \
   unattended-upgrades \
-  apt-listchanges \
-  chrony
+  apt-listchanges
 
 # Configure unattended-upgrades for automatic security updates
 cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UNATTENDED'
@@ -502,15 +549,14 @@ APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 AUTOUPGRADES
 
-# Configure chrony to use GOST NTP forwarder on vzNAT interface
-VZNAT_IP=$(ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-cat > /etc/chrony/sources.d/gost-ntp.sources << CHRONYSRC
-server ${VZNAT_IP} iburst
-CHRONYSRC
+# NTP/chrony configuration disabled due to Lima bug #4666 (NTP socket leak)
+# VZNAT_IP=$(ip -4 addr show vznat0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+# cat > /etc/chrony/sources.d/gost-ntp.sources << CHRONYSRC
+# server ${VZNAT_IP} iburst
+# CHRONYSRC
+# systemctl restart chrony
 
-systemctl restart chrony
-
-echo "✓ Package upgrades complete with automatic updates and NTP enabled"
+echo "✓ Package upgrades complete with automatic updates enabled"
 EOF
 
 sudo chmod +x /usr/local/bin/upgrade-via-proxy.sh
@@ -522,14 +568,14 @@ nohup sudo bash -c '/usr/local/bin/upgrade-via-proxy.sh 2>&1 | systemd-cat -t up
 echo "✓ Background upgrade started (check: journalctl -t upgrade-via-proxy -f)"
 APTSETUP
 
-    echo "✓ Apt proxy configured, upgrades/chrony setup running in background"
+    echo "✓ Apt proxy configured, upgrades running in background"
     
     echo ""
     echo "Commands:"
     echo "  Status:     limactl shell $VM_NAME sudo systemctl status gost.service"
     echo "  Logs:       limactl shell $VM_NAME sudo journalctl -u gost.service -f"
     echo "  Upgrade:    limactl shell $VM_NAME sudo journalctl -t upgrade-via-proxy -f"
-    echo "  NTP:        limactl shell $VM_NAME sudo chronyc tracking"
+    # echo "  NTP:        limactl shell $VM_NAME sudo chronyc tracking"
     echo "  Stop:       limactl shell $VM_NAME sudo systemctl stop gost.service"
     echo "  Restart:    limactl shell $VM_NAME sudo systemctl restart gost.service"
     echo ""

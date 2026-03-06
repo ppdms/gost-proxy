@@ -20,8 +20,8 @@ images:
     arch: "aarch64"
 
 # Resource allocation
-cpus: 2
-memory: "2GiB"
+cpus: 1
+memory: "1GiB"
 disk: "5GiB"
 
 # SSH configuration

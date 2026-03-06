@@ -107,7 +107,7 @@ if [ -n "$NEXTCLOUD_HOST" ]; then
     NC_HTTPS="${NEXTCLOUD_HTTPS_PORT:-443}"
     FIRST_SERVER="${SERVERS[0]}"
     echo "Enabling Nextcloud forwarding: HTTP:$NC_HTTP, HTTPS:$NC_HTTPS -> $NEXTCLOUD_HOST (via server $FIRST_SERVER)"
-    
+
     cat >> "$CONFIG_FILE" <<EOF
   - name: nextcloud-forward-http
     addr: :${NC_HTTP}
@@ -135,6 +135,30 @@ if [ -n "$NEXTCLOUD_HOST" ]; then
 
 EOF
 fi
+
+# Add SSH forward if configured
+if [ -n "$SSH_FORWARD_HOST" ]; then
+    SSH_LOCAL="${SSH_FORWARD_LOCAL_PORT:-2222}"
+    SSH_REMOTE="${SSH_FORWARD_REMOTE_PORT:-22}"
+    FIRST_SERVER="${SERVERS[0]}"
+    echo "Enabling SSH forwarding: localhost:$SSH_LOCAL -> $SSH_FORWARD_HOST:$SSH_REMOTE (via server $FIRST_SERVER)"
+
+    cat >> "$CONFIG_FILE" <<EOF
+  - name: ssh-forward
+    addr: :${SSH_LOCAL}
+    handler:
+      type: tcp
+      chain: chain-server${FIRST_SERVER}
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+        - name: ssh-target
+          addr: ${SSH_FORWARD_HOST}:${SSH_REMOTE}
+
+EOF
+fi
+
 
 echo ""
 
